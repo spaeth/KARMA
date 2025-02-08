@@ -4,7 +4,9 @@
 
 KARMA is a natural language processing framework that leverages a coordinated multi-agent system to automatically extract, validate, and integrate scientific knowledge into structured knowledge graphs. By employing specialized Large Language Model (LLM) agents, KARMA ensures high-quality knowledge extraction while maintaining semantic consistency.
 
-![画板 1](https://github.com/user-attachments/assets/477485dc-8d56-4b05-95a4-77547e5ceb39)
+![Overall](https://github.com/user-attachments/assets/477485dc-8d56-4b05-95a4-77547e5ceb39)
+
+Full codes will be available soon.
 
 
 ## 🌟 Highlights
