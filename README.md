@@ -1,14 +1,13 @@
 # KARMA: Leveraging Multi-Agent LLMs for Automated Knowledge Graph Enrichment 🤖 
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/) [![Arxiv](https://img.shields.io/badge/[arXiv-2410.05779-b31b1b)
 
 KARMA is a natural language processing framework that leverages a coordinated multi-agent system to automatically extract, validate, and integrate scientific knowledge into structured knowledge graphs. By employing specialized Large Language Model (LLM) agents, KARMA ensures high-quality knowledge extraction while maintaining semantic consistency.
 
 ![Overall](https://github.com/user-attachments/assets/477485dc-8d56-4b05-95a4-77547e5ceb39)
 
 > [!NOTE]
-> Full codes will be available soon.
-
+> A primitive version of KARMA has released, we are still working on updating the pipeline. Feel free to provide suggestions.
 
 ## 🌟 Highlights
 
@@ -36,35 +35,14 @@ KARMA is a natural language processing framework that leverages a coordinated mu
 
 ## 🚀 Quick Start
 
-To quickly get started with KARMA, you can either run the provided script 
+To quickly get started with KARMA, you can run the provided script 
 
 ```bash
-python run_pipeline.py
-```
-or use the pipeline directly in your code.
-
-```python
-from karma.pipeline import KARMAPipeline
-
-# Initialize pipeline
-pipeline = KARMAPipeline(
-    model_name="YOUR-MODEL",
-    log_dir="logs",
-    integrate_threshold=0.6
-)
-
-# Process single document
-results = pipeline.process_document(
-    document_path="path/to/document.pdf",
-    output_format="json"
-)
-
-# Batch processing
-results = pipeline.process_directory(
-    input_dir="path/to/documents",
-    output_dir="path/to/results",
-    file_types=["pdf", "txt"]
-)
+python karma_pipeline.py \
+--input path/to/document.pdf \
+--api_key your-openai-api-key \
+--model gpt-4o \
+--output results.json
 ```
 
 ## 📊 Output Format
@@ -110,6 +88,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 For questions and feedback:
 - Open an issue
 - Email: yxlu0613@gmail.com
+
+## 🔖 Cite Information
+
+@article{lu2025karma,
+  title={KARMA: Leveraging Multi-Agent LLMs for Automated Knowledge Graph Enrichment},
+  author={Lu, Yuxing and Wang, Jinzhuo},
+  journal={arXiv preprint arXiv:2502.06472},
+  year={2025}
+}
 
 ## 🙏 Acknowledgments
 
