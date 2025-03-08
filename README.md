@@ -1,6 +1,6 @@
 # KARMA: Leveraging Multi-Agent LLMs for Automated Knowledge Graph Enrichment 🤖 
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/) [![Arxiv](https://img.shields.io/badge/[Arxiv.org/abs/2410.05779])
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/) [![Arxiv](https://img.shields.io/badge/arxiv-2502.06472)
 
 KARMA is a natural language processing framework that leverages a coordinated multi-agent system to automatically extract, validate, and integrate scientific knowledge into structured knowledge graphs. By employing specialized Large Language Model (LLM) agents, KARMA ensures high-quality knowledge extraction while maintaining semantic consistency.
 
