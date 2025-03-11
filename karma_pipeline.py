@@ -128,10 +128,42 @@ class IngestionAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Ingestion Agent. Your responsibility is to:
-1. Retrieve raw publications from designated sources
-2. Convert various file formats into a consistent normalized text format
-3. Extract metadata such as the title, authors, journal name, publication date, and identifiers"""
+        self.system_prompt = """You are the Ingestion Agent (IA). Your responsibility is to:
+1. Retrieve raw publications from designated sources (e.g., PubMed, internal repositories).
+2. Convert various file formats (PDF, HTML, XML) into a consistent normalized text format.
+3. Extract metadata such as the title, authors, journal/conference name, publication date, and unique identifiers (DOI, PubMed ID).
+
+Key Requirements:
+- Handle OCR artifacts if the PDF is scanned (e.g., correct typical OCR errors where possible).
+- Normalize non-ASCII characters (Greek letters, special symbols) to ASCII or minimal LaTeX markup when relevant (e.g., \\alpha).
+- If certain fields cannot be extracted, leave them as empty or "N/A" but do not remove the key from the JSON.
+
+Error Handling:
+- In case of partial or unreadable text, mark the corrupted portions with placeholders (e.g., "[UNREADABLE]").
+- If the document is locked or inaccessible, set an error flag in the output JSON.
+
+POSITIVE EXAMPLE:
+Input: A complex PDF with LaTeX symbols and tables about IL-6 inhibition in rheumatoid arthritis
+Output: {
+  "metadata": {
+    "title": "Effects of IL-6 Inhibition on Inflammatory Markers in Rheumatoid Arthritis",
+    "authors": ["Jane Smith", "Robert Johnson"],
+    "journal": "Journal of Immunology",
+    "pub_date": "2021-05-15",
+    "doi": "10.1234/jimmunol.2021.05.123",
+    "pmid": "33123456"
+  },
+  "content": "Introduction\\nInterleukin-6 (IL-6) is a key cytokine in the pathogenesis of rheumatoid arthritis (RA)...Methods\\nPatients (n=120) were randomized to receive either IL-6 inhibitor (n=60) or placebo (n=60)..."
+}
+
+NEGATIVE EXAMPLE:
+Input: A complex PDF with LaTeX symbols and tables about IL-6 inhibition
+Bad Output: {
+  "title": "Effects of IL-6 Inhibition",
+  "text": "Interleukin-6 inhibition showed p<0.05 significance..."
+}
+This is incorrect because it doesn't use the expected metadata/content structure and omits required metadata fields.
+"""
 
     def ingest_document(self, raw_text: str) -> Dict:
         """
@@ -219,7 +251,7 @@ class IngestionAgent:
 class ReaderAgent:
     """
     Reader Agent (RA):
-    1) Splits the document into segments or sections
+    1) Segments normalized text into logical chunks
     2) Assigns a relevance score to each segment
     """
     def __init__(self, client: OpenAI, model_name: str):
@@ -232,9 +264,42 @@ class ReaderAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Reader Agent. Your goal is to parse text and generate logical segments 
-that are likely to contain relevant knowledge. Each segment must be accompanied by a 
-numeric Relevance Score indicating its importance for downstream extraction tasks."""
+        self.system_prompt = """You are the Reader Agent (RA). Your goal is to parse the normalized text and generate logical segments (e.g., paragraph-level chunks) that are likely to contain relevant knowledge. Each segment must be accompanied by a numeric Relevance Score indicating its importance for downstream extraction tasks.
+
+Scoring Heuristics:
+- Use domain knowledge (e.g., presence of known keywords, synonyms, or known entity patterns) to increase the score.
+- Use structural cues (e.g., headings like "Results", "Discussion" might have higher relevance for new discoveries).
+- If a segment is purely methodological (e.g., protocols or references to equipment) with no new knowledge, assign a lower score.
+
+Edge Cases:
+- Very short segments (<30 characters) or references sections might be assigned a minimal score.
+- If certain sections are incomplete or corrupted, still generate a segment but label it with "score": 0.0.
+
+POSITIVE EXAMPLE:
+Input: {
+  "metadata": {"title": "Antimicrobial Study"...},
+  "content": "Abstract\n We tested new...\n Methods\n The protocol was...\n Results\n The compound inhibited growth of S. aureus with MIC of 0.5 μg/mL\n"
+}
+Output: {
+  "segments": [
+    {"text": "Abstract We tested new...", "score": 0.85},
+    {"text": "Methods The protocol was...", "score": 0.30},
+    {"text": "Results The compound inhibited growth of S. aureus with MIC of 0.5 μg/mL", "score": 0.95}
+  ]
+}
+
+NEGATIVE EXAMPLE:
+Input: {
+  "metadata": {"title": "Antimicrobial Study"...},
+  "content": "Abstract\n We tested new...\n Methods\n The protocol was...\n Results\n The compound inhibited growth of S. aureus with MIC of 0.5 μg/mL\n"
+}
+Bad Output: {
+  "segments": [
+    {"text": "The entire paper discusses antimicrobial compounds", "score": 0.5}
+  ]
+}
+This is incorrect because it doesn't segment the text properly into logical chunks and doesn't assign differentiated relevance scores.
+"""
     
     def split_into_segments(self, content: str) -> List[Dict]:
         """
@@ -365,15 +430,15 @@ numeric Relevance Score indicating its importance for downstream extraction task
             import re
             float_matches = re.findall(r"[-+]?\d*\.\d+|\d+", score_str)
             if float_matches:
-                score_val = float(float_matches[0])
+                score = float(float_matches[0])
             else:
-                score_val = 0.5  # default if no float found
+                score = 0.5  # default if no float found
             
             prompt_tokens = response.usage.prompt_tokens
             completion_tokens = response.usage.completion_tokens
             processing_time = time.time() - start_time
 
-            return max(0.0, min(1.0, score_val)), prompt_tokens, completion_tokens, processing_time
+            return max(0.0, min(1.0, score)), prompt_tokens, completion_tokens, processing_time
         except Exception as e:
             logger.warning(f"Failed to parse relevance for segment. Error: {e}")
             return 0.5, 0, 0, time.time() - start_time  # default
@@ -381,8 +446,8 @@ numeric Relevance Score indicating its importance for downstream extraction task
 class SummarizerAgent:
     """
     Summarizer Agent (SA):
-    1) Takes relevant text segments
-    2) Produces concise summaries that preserve domain-specific terms
+    1) Converts high-relevance segments into concise summaries
+    2) Preserves technical details important for knowledge extraction
     """
     def __init__(self, client: OpenAI, model_name: str):
         """
@@ -394,9 +459,50 @@ class SummarizerAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Summarizer Agent. Your task is to convert text segments into concise summaries 
-while retaining technical detail such as gene symbols, chemical names, or numeric data that may be crucial 
-for entity/relationship extraction."""
+        self.system_prompt = """You are the Summarizer Agent (SA). Your task is to convert high-relevance segments into concise summaries while retaining technical detail such as gene symbols, chemical names, or numeric data that may be crucial for entity/relationship extraction.
+
+Summarization Rules:
+- Avoid discarding domain-specific terms that could indicate potential relationships. For example, retain "IL-6" or "p53" references precisely.
+- If numeric data is relevant (e.g., concentrations, p-values), incorporate them verbatim if possible.
+- Keep the summary length under 100 words to reduce computational overhead for downstream agents.
+
+Handling Irrelevant Segments:
+- If the Relevance Score is below a threshold (e.g., 0.2), you may skip or heavily compress the summary.
+- Mark extremely low relevance segments with "summary": "[OMITTED]" if not summarizable.
+
+POSITIVE EXAMPLE:
+Input: {
+  "segments": [
+    {"text": "In this study, IL-6 blockade with tocilizumab led to significant reduction in DAS28 scores (p<0.001) compared to placebo. Patients receiving 8mg/kg showed the greatest improvement (mean reduction 3.2 points).", "score": 0.90},
+    {"text": "The control group had p=0.01 in the secondary analysis.", "score": 0.75}
+  ]
+}
+Output: {
+  "summaries": [
+    {"original_text": "In this study, IL-6 blockade with tocilizumab led to significant reduction in DAS28 scores (p<0.001) compared to placebo. Patients receiving 8mg/kg showed the greatest improvement (mean reduction 3.2 points).",
+     "summary": "IL-6 blockade with tocilizumab significantly reduced DAS28 scores (p<0.001) vs placebo. The 8mg/kg dose had the best results (mean reduction 3.2 points).",
+     "score": 0.90},
+    {"original_text": "The control group had p=0.01 in the secondary analysis.",
+     "summary": "The control group showed statistical significance (p=0.01) in secondary analysis.",
+     "score": 0.75}
+  ]
+}
+
+NEGATIVE EXAMPLE:
+Input: {
+  "segments": [
+    {"text": "In this study, IL-6 blockade with tocilizumab led to significant reduction in DAS28 scores (p<0.001) compared to placebo. Patients receiving 8mg/kg showed the greatest improvement (mean reduction 3.2 points).", "score": 0.90}
+  ]
+}
+Bad Output: {
+  "summaries": [
+    {"original_text": "In this study, IL-6 blockade with tocilizumab led to significant reduction in DAS28 scores (p<0.001) compared to placebo. Patients receiving 8mg/kg showed the greatest improvement (mean reduction 3.2 points).",
+     "summary": "A drug helped patients improve their condition.",
+     "score": 0.90}
+  ]
+}
+This is incorrect because it discarded crucial technical details (IL-6, tocilizumab, DAS28 scores, p-value, dosage).
+"""
     
     def summarize_segment(self, segment: str) -> Tuple[str, int, int, float]:
         """
@@ -445,8 +551,8 @@ for entity/relationship extraction."""
 class EntityExtractionAgent:
     """
     Entity Extraction Agent (EEA):
-    1) Identifies biomedical entities in the text
-    2) Optionally normalizes them to canonical IDs
+    1) Identifies biomedical entities in summarized text
+    2) Classifies entity types and links to ontologies where possible
     """
     def __init__(self, client: OpenAI, model_name: str):
         """
@@ -458,8 +564,46 @@ class EntityExtractionAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Entity Extraction Agent. Your objective is to identify biomedical entities 
-(Disease, Drug, Gene, Protein, Chemical, etc.) and link each mention to a canonical ontology reference where possible."""
+        self.system_prompt = """You are the Entity Extraction Agent (EEA). Based on summarized text, your objective is to:
+1. Identify biomedical entities (Disease, Drug, Gene, Protein, Chemical, etc.).
+2. Link each mention to a canonical ontology reference (e.g., UMLS, MeSH, SNOMED CT).
+
+LLM-driven NER:
+- Use domain-specific knowledge to identify synonyms ("acetylsalicylic acid" → Aspirin).
+- Include multi-word expressions ("breast cancer" as a single mention).
+
+Handling Ambiguity:
+- If multiple ontology matches are possible, list the top candidate plus a short reason or partial mention of the second-best match.
+- If no suitable ontology reference is found, set "normalized_id": "N/A" and keep the raw mention.
+
+POSITIVE EXAMPLE:
+Input: {
+  "summary": "We tested Aspirin and ibuprofen for headache relief. Aspirin (100mg) was more effective for migraine, while ibuprofen (400mg) worked better for tension headaches. PTGS2 inhibition was the proposed mechanism."
+}
+Output: {
+  "entities": [
+    {"mention": "Aspirin", "type": "Drug", "normalized_id": "MESH:D001241"},
+    {"mention": "ibuprofen", "type": "Drug", "normalized_id": "MESH:D007052"},
+    {"mention": "headache", "type": "Symptom", "normalized_id": "MESH:D006261"},
+    {"mention": "migraine", "type": "Disease", "normalized_id": "MESH:D008881"},
+    {"mention": "tension headaches", "type": "Disease", "normalized_id": "MESH:D013313"},
+    {"mention": "PTGS2", "type": "Gene", "normalized_id": "NCBI:5743"}
+  ]
+}
+
+NEGATIVE EXAMPLE:
+Input: {
+  "summary": "We tested Aspirin for headache relief at a dosage of 100 mg."
+}
+Bad Output: {
+  "entities": [
+    {"mention": "Aspirin for headache relief", "type": "Medication", "normalized_id": "unknown"},
+    {"mention": "100", "type": "Measurement", "normalized_id": "N/A"},
+    {"mention": "mg", "type": "Unit", "normalized_id": "N/A"}
+  ]
+}
+This is incorrect because it didn't properly separate entities (Aspirin and headache should be separate) and created overly granular entities for dosage information.
+"""
 
     def extract_entities(self, text: str) -> Tuple[List[KGEntity], int, int, float]:
         """
@@ -546,8 +690,8 @@ class EntityExtractionAgent:
 class RelationshipExtractionAgent:
     """
     Relationship Extraction Agent (REA):
-    1) Given a set of recognized entities within a text,
-    2) Extract potential relationships among them (triplets)
+    1) Identifies relationships between extracted entities
+    2) Classifies relationship types
     """
     def __init__(self, client: OpenAI, model_name: str):
         """
@@ -559,8 +703,50 @@ class RelationshipExtractionAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Relationship Extraction Agent. Given a text snippet plus a set of recognized entities, 
-your mission is to detect possible relationships (e.g., treats, causes, interactsWith, inhibits) among them."""
+        self.system_prompt = """You are the Relationship Extraction Agent (REA). Given a text snippet plus a set of recognized entities, your mission is to detect possible relationships (e.g., treats, causes, interactsWith, inhibits).
+
+LLM-based Relation Classification:
+- Consider grammar structures (e.g., "X was observed to inhibit Y") and domain patterns ("X reduces expression of Y").
+- Allow multiple relationship candidates if the text is ambiguous or suggests multiple interactions.
+
+Negative Relation Handling:
+- If the text says "Aspirin does not treat migraine," the relationship (Aspirin, treats, migraine) is negative. Output no relationship in such cases.
+- Recognize negation cues ("no effect", "absence of association").
+
+POSITIVE EXAMPLE:
+Input: {
+  "summary": "Aspirin was shown to reduce headaches by inhibiting prostaglandin synthesis. It has no effect on hypertension.",
+  "entities": [
+    {"mention": "Aspirin", "type": "Drug", "normalized_id": "MESH:D001241"},
+    {"mention": "headaches", "type": "Disease", "normalized_id": "MESH:D006261"},
+    {"mention": "prostaglandin", "type": "Chemical", "normalized_id": "MESH:D011453"},
+    {"mention": "hypertension", "type": "Disease", "normalized_id": "MESH:D006973"}
+  ]
+}
+Output: {
+  "relationships": [
+    {"head": "Aspirin", "relation": "treats", "tail": "headaches", "confidence": 0.95},
+    {"head": "Aspirin", "relation": "inhibits", "tail": "prostaglandin", "confidence": 0.90}
+  ]
+}
+Note: No relationship is extracted between Aspirin and hypertension due to the negation.
+
+NEGATIVE EXAMPLE:
+Input: {
+  "summary": "Aspirin was shown to reduce headaches by inhibiting prostaglandin synthesis.",
+  "entities": [
+    {"mention": "Aspirin", "type": "Drug", "normalized_id": "MESH:D001241"},
+    {"mention": "headaches", "type": "Disease", "normalized_id": "MESH:D006261"},
+    {"mention": "prostaglandin", "type": "Chemical", "normalized_id": "MESH:D011453"}
+  ]
+}
+Bad Output: {
+  "relationships": [
+    {"head": "prostaglandin", "relation": "causes", "tail": "headaches", "confidence": 0.8}
+  ]
+}
+This is incorrect because the text doesn't explicitly state this relationship. While it might be inferred, we should only extract relationships directly supported by the text.
+"""
 
     def extract_relationships(self, text: str, entities: List[KGEntity]) -> Tuple[List[KnowledgeTriple], int, int, float]:
         """
@@ -720,7 +906,7 @@ your mission is to detect possible relationships (e.g., treats, causes, interact
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.0,
-                max_tokens=50
+                max_tokens=4096
             )
             
             content = response.choices[0].message.content.strip()
@@ -743,8 +929,8 @@ your mission is to detect possible relationships (e.g., treats, causes, interact
 class SchemaAlignmentAgent:
     """
     Schema Alignment Agent (SAA):
-    1) Maps extracted entities/relationships to existing KG schema types
-    2) Potentially flags new classes or relation types if unknown
+    1) Maps extracted entities to standard schema types
+    2) Normalizes relationship labels
     """
     def __init__(self, client: OpenAI, model_name: str):
         """
@@ -756,9 +942,50 @@ class SchemaAlignmentAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Schema Alignment Agent. Newly extracted entities or relationships may not match 
-existing knowledge graph classes or relation types. Your job is to determine how they should map onto the existing 
-ontology or schema."""
+        self.system_prompt = """You are the Schema Alignment Agent (SAA). Newly extracted entities or relationships may not match existing KG classes or relation types. Your job is to determine how they should map onto the existing ontology or schema.
+
+Ontology Reference:
+- For each unknown entity, propose a parent type from {Drug, Disease, Gene, Chemical, Protein, Pathway, Symptom, ...} if not in the KG.
+- For each unknown relation, map it to an existing relation if semantically close. Otherwise, propose a new label.
+
+Confidence Computation:
+- Consider lexical similarity, embedding distance, or domain rules (e.g., if an entity ends with "-in" or "-ase", it might be a protein or enzyme).
+- Provide a final numeric score for how certain you are of the proposed alignment.
+
+POSITIVE EXAMPLE:
+Input: {
+  "unknown_entities": ["TNF-alpha", "miR-21", "PDE4", "blood-brain barrier"],
+  "unknown_relations": ["overexpresses", "disrupts"]
+}
+Output: {
+  "alignments": [
+    {"id": "TNF-alpha", "proposed_type": "Protein", "status": "mapped", "confidence": 0.95},
+    {"id": "miR-21", "proposed_type": "RNA", "status": "new", "confidence": 0.90},
+    {"id": "PDE4", "proposed_type": "Enzyme", "status": "mapped", "confidence": 0.85},
+    {"id": "blood-brain barrier", "proposed_type": "Anatomical_Structure", "status": "mapped", "confidence": 0.95}
+  ],
+  "new_relations": [
+    {"relation": "overexpresses", "closest_match": "upregulates", "status": "mapped", "confidence": 0.85},
+    {"relation": "disrupts", "closest_match": "damages", "status": "new", "confidence": 0.70}
+  ]
+}
+
+NEGATIVE EXAMPLE:
+Input: {
+  "unknown_entities": ["TNF-alpha", "miR-21"],
+  "unknown_relations": ["overexpresses"]
+}
+Bad Output: {
+  "alignments": [
+    {"id": "TNF-alpha", "proposed_type": "Unknown", "status": "unknown"},
+    {"id": "miR-21", "proposed_type": "Unknown", "status": "unknown"}
+  ],
+  "new_relations": [
+    {"relation": "overexpresses", "closest_match": "unknown", "status": "unknown"}
+  ]
+}
+This is incorrect because the agent should use domain knowledge to propose appropriate entity types and relation mappings, rather than marking everything as unknown.
+"""
 
     def align_entities(self, entities: List[KGEntity]) -> Tuple[List[KGEntity], int, int, float]:
         """
@@ -933,9 +1160,40 @@ class ConflictResolutionAgent:
         """
         self.client = client
         self.model_name = model_name
-        self.system_prompt = """You are the Conflict Resolution Agent. Sometimes new triplets are detected that contradict 
-existing knowledge. Your role is to classify these contradictions and decide whether the new triplet should be 
-discarded, flagged for expert review, or integrated with caution."""
+        self.system_prompt = """You are the Conflict Resolution Agent (CRA). Sometimes new triplets are detected that contradict existing knowledge (e.g., (DrugX, causes, DiseaseY) vs. (DrugX, treats, DiseaseY)). Your role is to classify these into Contradict, Agree, or Ambiguous, and decide whether the new triplet should be discarded, flagged for expert review, or integrated with caution.
+
+LLM-based Debate:
+- Use domain knowledge to see if relationships can coexist (e.g., inhibits vs. activates are typically contradictory for the same target).
+- Consider partial contexts, e.g., different dosages or subpopulations.
+
+Escalation Criteria:
+- If the new triplet has high confidence but conflicts with old data that has lower confidence, consider overriding or review.
+- If both are high confidence, label Contradict, prompt manual verification.
+
+POSITIVE EXAMPLE:
+Input: {
+  "t_new": {"head": "Aspirin", "relation": "treats", "tail": "Headache", "confidence": 0.95},
+  "t_existing": {"head": "Aspirin", "relation": "causes", "tail": "Headache", "confidence": 0.70}
+}
+Output: {
+  "decision": "Contradict",
+  "resolution": {
+    "action": "review",
+    "rationale": "These represent opposite effects. However, Aspirin can both treat existing headaches and cause headaches as a side effect in some individuals. Expert validation needed to clarify contexts."
+  }
+}
+
+NEGATIVE EXAMPLE:
+Input: {
+  "t_new": {"head": "DrugX", "relation": "treats", "tail": "DiseaseY", "confidence": 0.95},
+  "t_existing": {"head": "DrugX", "relation": "causes", "tail": "DiseaseY", "confidence": 0.40}
+}
+Bad Output: {
+  "decision": "Agree",
+  "resolution": {"action": "integrate", "rationale": "Both can be true."}
+}
+This is incorrect because it fails to recognize the direct contradiction between treats and causes, and doesn't provide a sufficiently detailed rationale.
+"""
 
     def resolve_conflicts(
         self, 
@@ -1052,7 +1310,7 @@ discarded, flagged for expert review, or integrated with caution."""
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=256,
+                max_tokens=4096,
                 temperature=0.1
             )
             
@@ -1090,8 +1348,45 @@ class EvaluatorAgent:
         self.client = client
         self.model_name = model_name
         self.integrate_threshold = integrate_threshold
-        self.system_prompt = """You are the Evaluator Agent. Your duty is to aggregate confidence signals 
-into final scores and decide which knowledge to integrate into the knowledge graph."""
+        self.system_prompt = """You are the Evaluator Agent (EA). After extraction, alignment, and conflict resolution, each candidate triplet has multiple verification scores. Your duty is to aggregate these signals into final confidence, clarity, and relevance scores and decide whether to integrate each triplet into the KG.
+
+For CONFIDENCE evaluation:
+- Assess the factual correctness of the triple based on biomedical knowledge
+- Consider the source reliability and extraction confidence
+- Account for any conflict resolution outcomes
+
+For CLARITY evaluation:
+- Determine how unambiguous and well-defined the entities and relation are
+- Check for vague terms or imprecise relationship descriptions
+- Assess whether the triple would be interpretable to domain experts
+
+For RELEVANCE evaluation:
+- Evaluate how important and appropriate the triple is for the knowledge graph
+- Consider whether it aligns with the domain focus
+- Assess its potential utility for downstream applications
+
+POSITIVE EXAMPLE:
+Input: {
+  "triple": {"head": "Metformin", "relation": "decreases", "tail": "blood glucose levels"}
+}
+Output: {
+  "confidence": 0.95,
+  "clarity": 0.90,
+  "relevance": 0.85,
+  "rationale": "Well-established mechanism of action for this first-line antidiabetic drug. The entities and relationship are clearly defined. Highly relevant for a biomedical knowledge graph."
+}
+
+NEGATIVE EXAMPLE:
+Input: {
+  "triple": {"head": "Drug X", "relation": "may influence", "tail": "some cellular processes"}
+}
+Output: {
+  "confidence": 0.85,
+  "clarity": 0.40,
+  "relevance": 0.30,
+  "rationale": "The relationship is vaguely defined with uncertain terms. The entities lack specificity. Limited utility in a biomedical knowledge graph."
+}
+"""
 
     def finalize_triples(self, candidate_triples: List[KnowledgeTriple]) -> Tuple[List[KnowledgeTriple], int, int, float]:
         """
@@ -1177,21 +1472,35 @@ into final scores and decide which knowledge to integrate into the knowledge gra
         Evaluate the factual confidence of this biomedical statement:
         "{triple.head} -> {triple.relation} -> {triple.tail}"
 
-        Based on established biomedical knowledge, how confident are we that this relationship is accurate?
+        I need you to assess how confident we can be that this relationship is scientifically accurate based on established biomedical knowledge.
         
-        Rate from 0.0 (completely uncertain) to 1.0 (extremely confident).
+        Consider factors like:
+        1. Is this a well-established scientific fact?
+        2. Is there substantial evidence in the literature supporting this claim?
+        3. Would biomedical experts broadly agree with this statement?
+        4. Does it align with current scientific understanding?
+        
+        Rate your confidence from 0.0 (completely uncertain) to 1.0 (extremely confident).
         Return only a single float value between 0.0 and 1.0.
         
-        Example outputs:
-          0.67
-          0.34
+        Example ratings:
+        - 0.95-0.99: Well-established scientific facts with overwhelming evidence
+        - 0.80-0.94: Strong scientific consensus with substantial supporting evidence
+        - 0.60-0.79: Reasonably supported claims with some evidence base
+        - 0.40-0.59: Mixed evidence or emerging hypotheses
+        - 0.20-0.39: Limited evidence, preliminary findings
+        - 0.01-0.19: Very weak evidence, highly speculative
 
-        Invalid outputs:
-          1.0
-          0.0
-          0.99 is acceptable, 0.01 is acceptable.
+        POSITIVE EXAMPLES:
+        - "Metformin -> decreases -> blood glucose levels" = 0.97
+        - "Statins -> inhibit -> HMG-CoA reductase" = 0.95
+        - "Insulin resistance -> contributes to -> type 2 diabetes" = 0.93
 
-        Return only the numeric value.
+        NEGATIVE EXAMPLES:
+        - "Vitamin C -> cures -> cancer" = 0.12
+        - "Unknown compound -> may affect -> some pathways" = 0.25
+        
+        Return only the numeric value as a float between 0.0 and 1.0.
         """
         
         start_time = time.time()
@@ -1202,7 +1511,7 @@ into final scores and decide which knowledge to integrate into the knowledge gra
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=256,
+                max_tokens=4096,
                 temperature=0.0
             )
             
@@ -1233,23 +1542,36 @@ into final scores and decide which knowledge to integrate into the knowledge gra
         Evaluate the clarity and specificity of this biomedical relationship:
         "{triple.head} -> {triple.relation} -> {triple.tail}"
 
-        Consider:
-        1. Are the entities precise and unambiguous?
-        2. Is the relationship type specific and well-defined?
+        Assess how clear, specific, and unambiguous this statement is to biomedical experts.
+        
+        Consider these aspects:
+        1. Are the entities precise and unambiguous? (e.g., "ACE inhibitors" is clearer than "some drugs")
+        2. Is the relationship type specific and well-defined? (e.g., "inhibits" is clearer than "affects")
         3. Would biomedical experts interpret this statement consistently?
+        4. Are there any vague terms or imprecise language that reduce clarity?
+        5. Does the statement avoid unnecessary hedging words (e.g., "may", "possibly", "might")?
         
         Rate clarity from 0.0 (very ambiguous) to 1.0 (perfectly clear).
         Return only a single float value between 0.0 and 1.0.
-        Example outputs:
-          0.67
-          0.34
+        
+        Example ratings:
+        - 0.95-0.99: Crystal clear, highly specific statements with no ambiguity
+        - 0.80-0.94: Very clear statements with minor room for interpretation
+        - 0.60-0.79: Mostly clear statements with some potential ambiguity
+        - 0.40-0.59: Statements with moderate ambiguity or vagueness
+        - 0.20-0.39: Significantly vague or ambiguous statements
+        - 0.01-0.19: Extremely vague statements with minimal specificity
 
-        Invalid outputs:
-          1.0
-          0.0
-          0.99 is acceptable, 0.01 is acceptable.
+        POSITIVE EXAMPLES:
+        - "Atorvastatin -> inhibits -> HMG-CoA reductase" = 0.95
+        - "Aspirin -> irreversibly inhibits -> cyclooxygenase-1" = 0.97
+        - "TNF-alpha -> induces -> apoptosis in tumor cells" = 0.85
 
-        Return only the numeric value.
+        NEGATIVE EXAMPLES:
+        - "Some medicines -> may affect -> various biological processes" = 0.20
+        - "Drug X -> possibly influences -> certain cellular pathways" = 0.35
+        
+        Return only the numeric value as a float between 0.0 and 1.0.
         """
         
         start_time = time.time()
@@ -1260,7 +1582,7 @@ into final scores and decide which knowledge to integrate into the knowledge gra
                     {"role": "system", "content": "You evaluate clarity of biomedical relationships."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=256,
+                max_tokens=4096,
                 temperature=0.0
             )
             
@@ -1292,23 +1614,37 @@ into final scores and decide which knowledge to integrate into the knowledge gra
         Evaluate how relevant this relationship is to the {domain} domain:
         "{triple.head} -> {triple.relation} -> {triple.tail}"
 
-        Consider:
+        Assess how important and appropriate this statement is for inclusion in a specialized {domain} knowledge graph.
+        
+        Consider these aspects:
         1. Is this directly relevant to {domain} research or practice?
-        2. Would this information be valuable to include in a {domain} knowledge graph?
-        3. Is this specialized knowledge rather than general knowledge?
+        2. Does this provide valuable information to {domain} experts?
+        3. Would this knowledge be useful for {domain} applications (research, clinical practice, drug discovery, etc.)?
+        4. Is this specialized knowledge rather than general world knowledge?
+        5. Does it align with the core interests of the {domain} field?
         
         Rate relevance from 0.0 (completely irrelevant) to 1.0 (highly relevant).
         Return only a single float value between 0.0 and 1.0.
-        Example outputs:
-          0.67
-          0.34
+        
+        Example ratings:
+        - 0.95-0.99: Core {domain} knowledge essential to the field
+        - 0.80-0.94: Highly relevant information for {domain} specialists
+        - 0.60-0.79: Moderately relevant information with clear applications
+        - 0.40-0.59: Somewhat relevant but not central to the domain
+        - 0.20-0.39: Marginally relevant information
+        - 0.01-0.19: Largely irrelevant to the {domain} domain
 
-        Invalid outputs:
-          1.0
-          0.0
-          0.99 is acceptable, 0.01 is acceptable.
+        POSITIVE EXAMPLES:
+        - "Metformin -> decreases -> insulin resistance" = 0.95
+        - "BRCA1 mutation -> increases risk of -> breast cancer" = 0.97
+        - "Tumor necrosis factor -> stimulates -> inflammatory response" = 0.90
 
-        Return only the numeric value.
+        NEGATIVE EXAMPLES:
+        - "William Shakespeare -> wrote -> Hamlet" = 0.05 (literature knowledge, not biomedical)
+        - "Earth -> orbits -> Sun" = 0.01 (general knowledge, not specialized)
+        - "Company X -> manufactures -> medical devices" = 0.30 (business information, not core biomedical knowledge)
+        
+        Return only the numeric value as a float between 0.0 and 1.0.
         """
         
         start_time = time.time()
@@ -1319,7 +1655,7 @@ into final scores and decide which knowledge to integrate into the knowledge gra
                     {"role": "system", "content": f"You evaluate {domain} relevance of relationships."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=256,
+                max_tokens=4096,
                 temperature=0.0
             )
             
@@ -1349,7 +1685,6 @@ into final scores and decide which knowledge to integrate into the knowledge gra
         # Look for float numbers in the content
         import re
         float_matches = re.findall(r"[-+]?\d*\.\d+|\d+", content)
-        
         if float_matches:
             try:
                 score = float(float_matches[0])
